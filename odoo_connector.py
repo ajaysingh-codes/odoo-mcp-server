@@ -18,8 +18,8 @@ def get_odoo_connection():
         if uid:
             return uid, models
         else:
-            print("❌ Failed to authenticate with Odoo.")
+            print("Failed to authenticate with Odoo.")
             return None, None
     except Exception as e:
-        print("❌ Connection error:", e)
+        print("Connection error:", e)
         return None, None
