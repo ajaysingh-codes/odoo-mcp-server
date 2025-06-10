@@ -3,19 +3,23 @@ import json
 from dotenv import load_dotenv
 from anthropic import Anthropic
 import gradio as gr
-from odoo_actions import create_crm_lead, get_project_tasks, update_crm_lead, get_demo_company_domains
-from claude_router import classify_lead_need
-# from serper_search import search_google_profiles
-# from autonomous_agent import mcp_autonomous_lead_generator
+
+from odoo_actions import (
+    create_crm_lead,
+    get_project_tasks,
+    update_lead_by_email_with_classification,
+    get_company_by_email_domain,
+)
 
 load_dotenv()
+CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
 
-ANTHROPIC_API_KEY = os.getenv("CLAUDE_API_KEY")
 
 def mcp_create_odoo_lead(lead_title: str, company: str = None, contact: str = None,
                           email_address: str = None, phone_number: str = None, notes: str = "") -> dict:
     """
-    Creates a new lead in the Odoo CRM system.
+    Creates a new lead in the Odoo CRM system. 
+    This tool should be used **only if the company or contact does not already exist** in the CRM.
     """
     return create_crm_lead(
         lead_name=lead_title,
@@ -27,218 +31,128 @@ def mcp_create_odoo_lead(lead_title: str, company: str = None, contact: str = No
     )
 
 def mcp_get_odoo_tasks(project_name: str, number_of_tasks: int = 5) -> dict:
+    """Retrieves a list of tasks for a specified project from Odoo."""
+    return get_project_tasks(project_name, max_tasks=number_of_tasks)
+
+def mcp_classify_and_update_lead(email_text: str, email_address: str) -> dict:
     """
-    Retrieves a list of tasks for a specified Odoo project.
+    Classifies a lead using Claude (BANT) and updates the lead in Odoo by email address.
 
     Args:
-        project_name (str): Name of the project in Odoo.
-        number_of_tasks (int): Max number of tasks to retrieve (default: 5).
+        email_text (str): The lead's email message or request text.
+        email_address (str): The email of the lead (used to find them in Odoo).
 
     Returns:
-        dict: success flag, project info, list of tasks, or error message.
+        dict: Classification result and Odoo update result.
     """
-    return get_project_tasks(project_name, max_tasks = number_of_tasks)
+    client = Anthropic(api_key=os.getenv("CLAUDE_API_KEY"))
 
-def mcp_update_lead(email: str, update_fields: str) -> dict:
-    """
-    Updates a CRM lead using their email address.
+    prompt = f"""
+    You are a sales assistant trained in the BANT methodology.
 
-    Args:
-        email (str): The email address identifying the lead.
-        update_fields (str): A JSON string like '{"description": "followed up", "phone": "123456"}'.
+    Classify this lead by providing:
+    - lead_type: "Qualified Buyer", "Job Applicant", "Investor", "Researcher", or "Other"
+    - budget, authority, need, and timeline (BANT)
+    - is_qualified: true/false
 
-    Returns:
-        dict: Update status.
-    """
-    try:
-        updates = json.loads(update_fields)
-        return update_crm_lead(email, updates)
-    except json.JSONDecodeError:
-        return {"success": False, "message": "Invalid JSON format for update fields."}
-
-'''
-def mcp_search_profiles(company: str, role: str = "product manager") -> list:
-    """
-    Uses Serper.dev to find public LinkedIn profiles of people with the given role at the given company.
-
-    Args:
-        company (str): The target company to search (e.g., "Stripe").
-        role (str, optional): The job title or role (default is "product manager").
-
-    Returns:
-        list[dict]: Search result entries with title, snippet, and link.
-    """
-    query = f'site:linkedin.com/in "{role}" "{company}"'
-    return search_google_profiles(query)
-'''
-
-def qualify_bant_lead(email_text: str) -> dict:
-    """
-    Uses Claude to assess an inbound lead email and extract BANT qualification and lead type.
-
-    Args:
-        email_text (str): The raw text of the inbound email or transcript.
-
-    Returns:
-        dict: Includes `lead_type`, full BANT breakdown, `is_qualified`, and an explanation.
-    """
-    client = Anthropic(api_key=ANTHROPIC_API_KEY)
-    system_prompt = f"""
-        You are a sales qualification assistant trained in BANT methodology.
-        Your task is to classify inbound leads and determine whether they are a qualified buyer or something else (e.g., job applicant, researcher, investor).
-
-        First, determine the lead_type:
-        - Qualified Buyer
-        - Job Applicant
-        - Researcher
-        - Investor
-        - Other
-
-        Then evaluate each BANT criterion:
-        - Budget: Do they mention budget or purchasing intent?
-        - Authority: Are they a decision-maker or purchasing stakeholder?
-        - Need: Do they clearly express a need for the product or service?
-        - Timeframe: Is there a stated or implied urgency?
-
-        Respond in the following JSON format:
-        {{
-        "lead_type": "Qualified Buyer",
-        "BANT": {{
-            "Budget": true,
-            "Authority": true,
-            "Need": true,
-            "Timeframe": "Q3 2025"
-        }},
-        "is_qualified": true,
-        "explanation": "Clear buying intent with urgency and decision-making authority."
-        }}
-        """
-    
-    user_prompt = f"""Here is an inbound message to analyze:
-
+    Lead Email/Text:
+    \"\"\"
     {email_text}
+    \"\"\"
 
-    Classify the lead type and assess BANT as instructed.
+    Respond in JSON format like:
+    {{
+    "lead_type": "...",
+    "budget": "...",
+    "authority": "...",
+    "need": "...",
+    "timeline": "...",
+    "is_qualified": true
+    }}
     """
+
     try:
         response = client.messages.create(
             model="claude-opus-4-20250514",
-            max_tokens=1000,
-            temperature=0.5,
-            system=system_prompt,
-            messages=[
-                {"role": "user", "content": user_prompt}
-            ]
+            max_tokens=800,
+            temperature=0.3,
+            messages=[{"role": "user", "content": prompt}]
         )
-        try:
-            # Extract JSON from markdown code block if present
-            response_text = response.content[0].text
-            if "```json" in response_text and "```" in response_text.split("```json", 1)[1]:
-                # Extract content between ```json and the next ```
-                json_text = response_text.split("```json", 1)[1].split("```", 1)[0].strip()
-            elif "```" in response_text and "```" in response_text.split("```", 1)[1]:
-                # Try without the json specifier
-                json_text = response_text.split("```", 1)[1].split("```", 1)[0].strip()
-            else:
-                # No code block, use the raw text
-                json_text = response_text
-                
-            # Parse the extracted JSON
-            result = json.loads(json_text)
-            return result
-        except json.JSONDecodeError:
-            return {
-                "error": "Failed to parse Claude's response as JSON",
-                "raw_response": response.content[0].text
-            }
+        
+        # Ensure response.content is valid and extract text from the first block
+        if not response.content or not isinstance(response.content, list) or len(response.content) == 0:
+            raise ValueError("Claude response content is empty or not in the expected list format.")
+        
+        first_block = response.content[0]
+        if not hasattr(first_block, 'text'):
+            # This case might occur if the block type is not 'text' (e.g., 'image')
+            raise ValueError("Claude response's first content block does not have a 'text' attribute.")
+            
+        raw_json_string = first_block.text
+
+        # Clean potential markdown code block fences, as per MEMORY[209c25eb-2762-449b-bb96-8ff6ecfeff4e]
+        if raw_json_string.startswith("```json\n") and raw_json_string.endswith("\n```"):
+            raw_json_string = raw_json_string[len("```json\n"):-len("\n```")]
+        elif raw_json_string.startswith("```") and raw_json_string.endswith("```"): # A simpler check for just backticks
+            raw_json_string = raw_json_string[len("```"):-len("```")]
+        
+        # Strip any leading/trailing whitespace that might interfere with JSON parsing
+        raw_json_string = raw_json_string.strip()
+        
+        # For debugging, you might want to print the string that will be parsed:
+        print(f"Attempting to parse JSON: '{raw_json_string}'") 
+
+        classification = json.loads(raw_json_string)
     except Exception as e:
-        return {"error": str(e)}
+        # Consider logging the raw_json_string here if parsing fails for further debugging
+        # e.g., import logging; logging.error(f"Failed to parse JSON. String was: '{raw_json_string if 'raw_json_string' in locals() else 'unavailable'}' Error: {e}")
+        return {"success": False, "error": f"Claude call or JSON parsing failed: {e}"}
 
-'''
-lead_generator_iface = gr.Interface(
-    fn=mcp_autonomous_lead_generator,
+    # Update the lead using email
+    result = update_lead_by_email_with_classification(email_address, classification, assign_salesperson)
+
+    return {
+        "success": result.get("success", False),
+        "claude_classification": classification,
+        "odoo_result": result,
+        "assign_salesperson": assign_salesperson,
+        "matched_company": company_check.get("partner") if assign_salesperson else None
+    }
+
+# MCP Tool Interfaces
+lead_creator_iface = gr.Interface(fn=mcp_create_odoo_lead, inputs=[
+    gr.Textbox(label="Lead Title"),
+    gr.Textbox(label="Company Name"),
+    gr.Textbox(label="Contact Name"),
+    gr.Textbox(label="Email Address"),
+    gr.Textbox(label="Phone Number"),
+    gr.Textbox(label="Notes", lines=3),
+], outputs=gr.JSON(), flagging_mode="never")
+
+task_fetcher_iface = gr.Interface(fn=mcp_get_odoo_tasks, inputs=[
+    gr.Textbox(label="Project Name"),
+    gr.Number(label="Number of Tasks", value=5)
+], outputs=gr.JSON(), flagging_mode="never")
+
+lead_classifier_iface = gr.Interface(
+    fn=mcp_classify_and_update_lead,
     inputs=[
-        gr.Textbox(label="Company", placeholder="e.g. Stripe"),
-        gr.Textbox(label="Role", value="Product Manager")
+        gr.Text(label="Email Text"),
+        gr.Text(label="Email Address")
     ],
-    outputs=gr.JSON(label="Created Leads"),
-    title="Autonomous Lead Generator (MCP Tool)",
-    description="Searches, enriches, and creates leads from a company and role. Powered by Serper.dev + Claude + Odoo.",
-    allow_flagging='never'
-)
-'''
-
-lead_creator_tool_iface = gr.Interface(
-    fn=mcp_create_odoo_lead,
-    inputs=[
-        gr.Text(label="Lead Title"),
-        gr.Text(label="Company Name"),
-        gr.Text(label="Contact Name"),
-        gr.Text(label="Email Address"),
-        gr.Text(label="Phone Number"),
-        gr.Text(label="Notes", lines=3),
-    ],
-    outputs=gr.JSON(label="Response"),
-    title="Create CRM Lead",
-    description="Create a new lead in the Odoo CRM system.",
+    outputs=gr.JSON(label="Classification Result"),
+    allow_flagging="never"
 )
 
-task_fetcher_tool_iface = gr.Interface(
-    fn=mcp_get_odoo_tasks,
-    inputs=[gr.Text(label="Project Name"), gr.Number(label="Number of Tasks", value=5)],
-    outputs=gr.JSON(label="Task List"),
-    title="Odoo Project Task Fetcher (MCP Tool)",
-    description="Fetch tasks for a given Odoo project. Exposed as an MCP tool.",
-    flagging_mode="never"
-)
-
-update_lead_tool_iface = gr.Interface(
-    fn=mcp_update_lead,
-    inputs=[
-        gr.Text(label="Email Address"),
-        gr.Text(label="Update Fields (JSON)", lines=3),
-    ],
-    outputs=gr.JSON(label="Response"),
-    title="Update CRM Lead",
-    description="Update an existing lead in the Odoo CRM system.",
-)
-"""
-search_tool_iface = gr.Interface(
-    fn=mcp_search_profiles,
-    inputs=[
-        gr.Textbox(label="Company", placeholder="e.g. Stripe"),
-        gr.Textbox(label="Role", value="product manager")
-    ],  
-    outputs=gr.JSON(label="Search Results"),
-    title="Search PMs at a Company (via Serper.dev)",
-    description="Searches Google for public LinkedIn profiles using Serper.dev. This is used to find PMs at a target company.",
-    flagging_mode='never'
-)
-"""
-
-bant_qual_tool = gr.Interface(
-    fn=qualify_bant_lead,
-    inputs=gr.Textbox(label="Inbound Email or Transcript", lines=10),
-    outputs=gr.JSON(label="BANT Qualification"),
-    title="Lead Qualification Tool (BANT + Type Classifier)",
-    description="Analyze a lead's email and determine if they're a qualified buyer using BANT. Claude will also classify if the sender is an investor, researcher, job applicant, etc.",
-    flagging_mode='never'
-)
+# Gradio UI/MCP server
+with gr.Blocks() as demo:
+    gr.Markdown("### Odoo MCP Tools")
+    with gr.Tab("Create Lead"):
+        lead_creator_iface.render()
+    with gr.Tab("Get Tasks"):
+        task_fetcher_iface.render()
+    with gr.Tab("Classify and Update Lead"):
+        lead_classifier_iface.render()
 
 if __name__ == "__main__":
-    with gr.Blocks() as demo:
-        gr.Markdown("# Odoo MCP Tools")
-        with gr.Tab("Create CRM Lead"):
-            lead_creator_tool_iface.render()
-        with gr.Tab("Get Project Tasks"):
-            task_fetcher_tool_iface.render()
-        with gr.Tab("Update CRM Lead"):
-            update_lead_tool_iface.render()
-        # with gr.Tab("Search PMs at a Company"):
-        #     search_tool_iface.render()
-        # with gr.Tab("Autonomous Lead Generator"):
-        #     lead_generator_iface.render()
-        with gr.Tab("Lead Qualification Tool"):
-            bant_qual_tool.render()
-    
     demo.launch(mcp_server=True, server_name="0.0.0.0", share=False)
