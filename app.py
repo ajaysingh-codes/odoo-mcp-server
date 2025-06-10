@@ -30,7 +30,6 @@ def mcp_create_odoo_lead(lead_title: str, company: str = None, contact: str = No
         description=notes
     )
 
-
 def mcp_get_odoo_tasks(project_name: str, number_of_tasks: int = 5) -> dict:
     """Retrieves a list of tasks for a specified project from Odoo."""
     return get_project_tasks(project_name, max_tasks=number_of_tasks)
