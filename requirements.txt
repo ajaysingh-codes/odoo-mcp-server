@@ -1,3 +1,5 @@
 gradio==5.33.0
 gradio_client==1.10.2
 python-dotenv==1.0.1
+anthropic>=0.25.0
+xmlrpc
