@@ -1,4 +1,4 @@
-from src.odoo_connector import get_odoo_connection
+from odoo_connector import get_odoo_connection
 
 uid, models = get_odoo_connection()
 

@@ -1,98 +1,89 @@
 from odoo_connector import get_odoo_connection, ODOO_DB, ODOO_PASSWORD
 
-def get_demo_company_domains() -> list:
+def get_company_by_email_domain(email: str) -> dict:
     """
-    Returns a list of email domains from demo companies in Odoo (tagged 'demo_company').
+    Check if the given email domain belongs to any known company in Odoo.
+
+    Args:
+        email (str): The email address to check.
+
+    Returns:
+        dict: { success: bool, partner: {...} or message/error }
     """
     uid, models = get_odoo_connection()
     if not uid or not models:
-        return []
+        return {"success": False, "error": "Failed to connect to Odoo"}
 
     try:
-        # Get 'demo_company' tag ID
-        tag = models.execute_kw(
-            ODOO_DB,
-            uid,
-            ODOO_PASSWORD,
-            'res.partner.category',
-            'search_read',
-            [[("name", "=", "demo_company")]],
-            {'fields': ['id'], 'limit': 1}
+        domain = email.split("@")[-1]
+        results = models.execute_kw(
+            ODOO_DB, uid, ODOO_PASSWORD, 'res.partner', 'search_read',
+            [[['email', 'ilike', f'%@{domain}']]],
+            {'fields': ['id', 'name', 'email'], 'limit': 1}
         )
-        if not tag:
-            return []
-        tag_id = tag[0]['id']
-
-        # Get demo companies
-        companies = models.execute_kw(
-            ODOO_DB,
-            uid,
-            ODOO_PASSWORD,
-            'res.partner',
-            'search_read',
-            [[("category_id", "in", [tag_id])], ['is_company', '=', True]],
-            {'fields': ['email'], 'limit': 50}
-        )
-
-        domains = []
-        for company in companies:
-            email = company.get('email', '')
-            if '@' in email:
-                domain = email.split('@')[-1].strip().lower()
-                domains.append(domain)
-        return domains
+        if results:
+            return {"success": True, "partner": results[0]}
+        else:
+            return {"success": False, "message": "No matching company found."}
     except Exception as e:
-        print(f"Error fetching demo company domains: {e}")
-        return []
+        return {"success": False, "error": str(e)}
 
+from odoo_connector import get_odoo_connection, ODOO_DB, ODOO_PASSWORD
 
-def create_crm_lead(lead_name: str, company_name: str = None, contact_name: str = None, email: str = None, phone: str = None, description: str = "", tags: list = None) -> dict:
+def get_assigned_salesperson_from_domain(email: str) -> int:
+    """
+    Given an email, finds the related company by domain and returns the assigned salesperson's user_id.
+    """
+    uid, models = get_odoo_connection()
+    if not uid or not models:
+        return None
+
+    try:
+        domain = email.split('@')[-1].lower()
+        partners = models.execute_kw(
+            ODOO_DB, uid, ODOO_PASSWORD,
+            'res.partner', 'search_read',
+            [[['email', 'ilike', f'%@{domain}']]],
+            {'fields': ['id', 'name', 'user_id'], 'limit': 1}
+        )
+        if partners and partners[0].get("user_id"):
+            return partners[0]["user_id"][0]  # user_id = [id, name]
+        return None
+    except Exception as e:
+        print(f"[Error] while fetching salesperson from domain: {e}")
+        return None
+
+def create_crm_lead(lead_name, company_name=None, contact_name=None, email=None, phone=None, description=""):
     """Create a new CRM lead in Odoo."""
     uid, models = get_odoo_connection()
     if not uid or not models:
         return {"success": False, "message": "Failed to connect to Odoo."}
 
-    tag_ids = []
-    if tags:
-        for tag in tags:
-            existing = models.execute_kw(
-                ODOO_DB,
-                uid,
-                ODOO_PASSWORD,
-                'res.partner.category',
-                'search_read',
-                [[("name", "=", tag)]],
-                {'fields': ['id'], 'limit': 1}
-            )
-            if existing:
-                tag_ids.append(existing[0]['id'])
-            else:
-                tag_id = models.execute_kw(
-                    ODOO_DB,
-                    uid,
-                    ODOO_PASSWORD,
-                    'res.partner.category',
-                    'create',
-                    [{"name": tag}]
-                )
-                tag_ids.append(tag_id)
-    
     lead_data = {
         "name": lead_name,
-        "type": "lead",
         "partner_name": company_name,
         "contact_name": contact_name,
         "email_from": email,
         "phone": phone,
         "description": description,
-        "tag_ids": [(6, 0, tag_ids)] if tag_ids else None
     }
+
+    # 🧠 Auto-assign if salesperson is tied to email domain
+    if email and '@' in email:
+        assigned_user_id = get_assigned_salesperson_from_domain(email)
+        if assigned_user_id:
+            lead_data['user_id'] = assigned_user_id
+            lead_data['priority'] = '2'  # mark as high-priority
 
     lead_data = {k: v for k, v in lead_data.items() if v is not None}
 
     try:
         lead_id = models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, "crm.lead", "create", [lead_data])
-        return {"success": True, "lead_id": lead_id}
+        return {
+            "success": True, 
+            "lead_id": lead_id,
+            "assigned": bool(lead_data.get("user_id")),
+            "message": f"Lead '{lead_name}' created and assigned." if lead_data.get("user_id") else f"Lead '{lead_name}' created."}
     except Exception as e:
         return {"success": False, "message": str(e)}
     
@@ -149,43 +140,54 @@ def get_project_tasks(project_name: str, max_tasks: int = 5) -> dict:
     except Exception as e:
         return {"success": False, "error": str(e)}
 
-def update_crm_lead(lead_email: str, updates: dict) -> dict:
+def update_lead_by_email_with_classification(email: str, classification: dict, assign_salesperson: bool = False) -> dict:
     """
-    Updates an existing lead in Odoo CRM based on the lead's email.
+    Update a lead in Odoo by email with BANT classification and optionally assign a salesperson.
 
     Args:
-        lead_email (str): Email used to find the lead.
-        updates (dict): Dictionary of fields to update.
+        email (str): Email of the lead (email_from field).
+        classification (dict): Claude's classification result.
+        assign_salesperson (bool): Whether to assign current user to the lead.
 
     Returns:
-        dict: Result of the operation with success status and message.
+        dict: Success/failure message and lead ID (if found).
     """
     uid, models = get_odoo_connection()
     if not uid or not models:
-        return {"success": False, "message": "Failed to connect to Odoo."}
-    
+        return {"success": False, "error": "Failed to connect to Odoo"}
+
     try:
+        # 1. Search for the lead by email
         lead_ids = models.execute_kw(
-            ODOO_DB,
-            uid,
-            ODOO_PASSWORD,
-            "crm.lead",
-            "search",
-            [[("email_from", "=", lead_email)]]
+            ODOO_DB, uid, ODOO_PASSWORD,
+            'crm.lead', 'search',
+            [[('email_from', '=', email)]],
+            {'limit': 1}
         )
 
         if not lead_ids:
-            return {"success": False, "message": f"Lead with email {lead_email} not found."}
+            return {"success": False, "error": f"No lead found with email {email}"}
 
-        models.execute_kw(
-            ODOO_DB,
-            uid,
-            ODOO_PASSWORD,
-            "crm.lead",
-            "write",
-            [lead_ids, updates]
+        lead_id = lead_ids[0]
+
+        # 2. Format the classification into notes
+        classification_text = "\n".join([f"{k}: {v}" for k, v in classification.items()])
+        values = {
+            'description': f"BANT Classification:\n{classification_text}",
+            'type': 'opportunity' if classification.get("is_qualified") else 'lead',
+        }
+
+        if assign_salesperson:
+            values['user_id'] = uid
+
+        # 3. Update the lead
+        result = models.execute_kw(
+            ODOO_DB, uid, ODOO_PASSWORD,
+            'crm.lead', 'write',
+            [[lead_id], values]
         )
 
-        return {"success": True, "message": f"Lead with email {lead_email} updated successfully."}
+        return {"success": result, "lead_id": lead_id, "message": "Lead updated." if result else "Update failed."}
+
     except Exception as e:
-        return {"success": False, "message": str(e)}
+        return {"success": False, "error": str(e)}
